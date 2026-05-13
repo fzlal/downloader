@@ -1,0 +1,82 @@
+name: '📥 YouTube Downloader'
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube video URL'
+        required: true
+        default: 'https://www.youtube.com/watch?v=6iMi5BiQcoI'
+      output_filename:
+        description: 'Output filename (e.g. my_video.mp4)'
+        required: true
+        default: 'video.mp4'
+      quality:
+        description: 'Quality (best, worst, 720, 480, etc.)'
+        required: false
+        default: 'best'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 📦 Install yt-dlp + ffmpeg
+        run: |
+          python -m pip install --upgrade pip
+          pip install yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: 🦕 Install Deno (JavaScript runtime for yt-dlp)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+      - name: 🍪 Set up cookies from secret
+        run: |
+          mkdir -p .cookies
+          echo "${{ secrets.YT_COOKIES }}" > .cookies/cookies.txt
+
+      - name: 🎬 Download video
+        run: |
+          mkdir -p videos
+          export PATH="$HOME/.deno/bin:$PATH"
+          
+          QUALITY_INPUT="${{ github.event.inputs.quality }}"
+          
+          # ساخت فرمت سلکتور ساده و بدون خطا
+          if [ "$QUALITY_INPUT" = "best" ]; then
+            FORMAT_SELECTOR="bestvideo+bestaudio"
+          elif [ "$QUALITY_INPUT" = "worst" ]; then
+            FORMAT_SELECTOR="worstvideo+worstaudio"
+          else
+            # برای اعداد مثل 720 (بدون بک‌اسلش)
+            FORMAT_SELECTOR="bestvideo[height<=${QUALITY_INPUT}]+bestaudio/best[height<=${QUALITY_INPUT}]"
+          fi
+          
+          echo "Using format selector: $FORMAT_SELECTOR"
+          
+          yt-dlp \
+            --cookies .cookies/cookies.txt \
+            --js-runtimes deno \
+            --extractor-args "youtube:player_js_variant=tv" \
+            -f "$FORMAT_SELECTOR" \
+            --merge-output-format mp4 \
+            -o "videos/${{ github.event.inputs.output_filename }}" \
+            "${{ github.event.inputs.video_url }}"
+
+      - name: 🔄 Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          git add videos/
+          git diff --staged --quiet || git commit -m "Add video: ${{ github.event.inputs.output_filename }}"
+          git push

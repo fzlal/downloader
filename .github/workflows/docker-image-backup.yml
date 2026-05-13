@@ -1,0 +1,100 @@
+name: Download and Split Docker Images
+
+on:
+  workflow_dispatch:
+
+jobs:
+  download-and-split:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create directories
+        run: |
+          mkdir -p images/split
+          mkdir -p images/complete
+
+      - name: Download and split images
+        run: |
+          # لیست تصاویر مورد نیاز (همان چهار تصویر قبلی)
+          IMAGES="
+            ghcr.io/etkecc/ketesa:latest
+          "
+          
+          for IMAGE in $IMAGES; do
+            echo "Processing: $IMAGE"
+            
+            # نام فایل base
+            BASENAME=$(echo "$IMAGE" | tr '/' '_' | tr ':' '_')
+            COMPLETE_FILE="images/complete/${BASENAME}.tar"
+            FINAL_SPLIT_DIR="images/split/${BASENAME}"
+            
+            # ایجاد پوشه برای تکه‌های این تصویر
+            mkdir -p "$FINAL_SPLIT_DIR"
+            
+            # دانلود و سیو کردن تصویر
+            docker pull "$IMAGE"
+            docker save "$IMAGE" -o "$COMPLETE_FILE"
+            
+            # اسپلیت کردن فایل (هر تکه 95 مگابایت برای احتیاط)
+            # -d: استفاده از پسوند عددی (00, 01, ...)
+            # -a 2: طول عدد 2 رقمی
+            split -b 95m "$COMPLETE_FILE" "$FINAL_SPLIT_DIR/part_" -d
+            
+            # حذف فایل کامل برای صرفه‌جویی در فضا
+            rm "$COMPLETE_FILE"
+            
+            echo "✅ Split into: $(ls $FINAL_SPLIT_DIR | wc -l) parts"
+          done
+
+      - name: Create reassemble script
+        run: |
+          cat > reassemble.sh << 'EOF'
+          #!/bin/bash
+          # اسکریپت برای چسباندن تکه‌ها و لود کردن تصاویر داکر
+          
+          echo "🔧 Reassembling Docker images from split parts..."
+          
+          for IMAGE_DIR in images/split/*/; do
+            if [ -d "$IMAGE_DIR" ]; then
+              BASENAME=$(basename "$IMAGE_DIR")
+              echo "📦 Reassembling: $BASENAME"
+              
+              # چسباندن تکه‌ها به یک فایل کامل
+              cat "$IMAGE_DIR"part_* > "${BASENAME}.tar"
+              
+              # لود کردن به داکر
+              echo "  Loading into Docker..."
+              docker load < "${BASENAME}.tar"
+              
+              # پاک کردن فایل tar موقت
+              rm "${BASENAME}.tar"
+              echo "  ✅ Done for $BASENAME"
+            fi
+          done
+          
+          echo "🎉 All images have been loaded successfully!"
+          EOF
+          
+          chmod +x reassemble.sh
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add images/
+          git add reassemble.sh
+          git commit -m "Add split Docker images and reassembly script" || echo "No changes to commit"
+          git push

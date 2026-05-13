@@ -1,0 +1,141 @@
+name: 📥 Auto Downloader & Splitter
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: '🔗 File URL to download'
+        required: true
+        type: string
+      output_name:
+        description: '📁 Output folder & final file name (Optional - otherwise extracted from URL)'
+        required: false
+        type: string
+      part_size:
+        description: '✂️ Part size (e.g., 49M, 100M)'
+        required: false
+        default: '49M'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-split:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📂 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🗂️ Create base downloads directory
+        run: mkdir -p downloads
+
+      - name: 📝 Extract filename from URL or use input
+        id: filenames
+        run: |
+          if [ -n "${{ inputs.output_name }}" ]; then
+            FOLDER_NAME="${{ inputs.output_name }}"
+            ORIGINAL_FILENAME="${{ inputs.output_name }}"
+          else
+            BASENAME=$(basename "${{ inputs.download_url }}" | sed 's/?.*//')
+            FOLDER_NAME="$BASENAME"
+            ORIGINAL_FILENAME="$BASENAME"
+          fi
+          # Sanitize folder name (replace unwanted chars)
+          FOLDER_NAME=$(echo "$FOLDER_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
+          echo "folder_name=$FOLDER_NAME" >> $GITHUB_OUTPUT
+          echo "original_filename=$ORIGINAL_FILENAME" >> $GITHUB_OUTPUT
+
+      - name: ⬇️ Download file
+        id: download
+        run: |
+          curl -L --retry 3 "${{ inputs.download_url }}" -o "temp_downloaded_file"
+          FILE_SIZE=$(stat -c%s "temp_downloaded_file")
+          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
+
+      - name: 🧠 Check file size vs part size
+        id: check
+        run: |
+          PART_SIZE_NUM=$(echo "${{ inputs.part_size }}" | sed 's/[^0-9]//g')
+          PART_SIZE_UNIT=$(echo "${{ inputs.part_size }}" | sed 's/[0-9]//g')
+          case $PART_SIZE_UNIT in
+            M|m) PART_SIZE_BYTES=$((PART_SIZE_NUM * 1024 * 1024)) ;;
+            K|k) PART_SIZE_BYTES=$((PART_SIZE_NUM * 1024)) ;;
+            G|g) PART_SIZE_BYTES=$((PART_SIZE_NUM * 1024 * 1024 * 1024)) ;;
+            *) PART_SIZE_BYTES=$PART_SIZE_NUM ;;
+          esac
+          echo "part_size_bytes=$PART_SIZE_BYTES" >> $GITHUB_OUTPUT
+          if [ ${{ steps.download.outputs.file_size }} -lt $PART_SIZE_BYTES ]; then
+            echo "should_split=false" >> $GITHUB_OUTPUT
+          else
+            echo "should_split=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🚀 Upload directly (no split, no folder)
+        if: steps.check.outputs.should_split == 'false'
+        run: |
+          TARGET_FILE="downloads/${{ steps.filenames.outputs.original_filename }}"
+          mv temp_downloaded_file "$TARGET_FILE"
+          echo "✅ File size (${{ steps.download.outputs.file_size }} bytes) is less than part size (${{ steps.check.outputs.part_size_bytes }} bytes). Uploaded directly to downloads/ without splitting."
+
+      - name: ✂️ Split file into parts (only when needed)
+        if: steps.check.outputs.should_split == 'true'
+        run: |
+          TARGET="downloads/${{ steps.filenames.outputs.folder_name }}"
+          rm -rf "$TARGET"
+          mkdir -p "$TARGET"
+          split -b "${{ inputs.part_size }}" -d -a 3 temp_downloaded_file "$TARGET/part_"
+          rm -f temp_downloaded_file
+
+      - name: 📜 Generate reassembly scripts (only when split)
+        if: steps.check.outputs.should_split == 'true'
+        run: |
+          TARGET_DIR="downloads/${{ steps.filenames.outputs.folder_name }}"
+          ORIG_NAME="${{ steps.filenames.outputs.original_filename }}"
+
+          # ---- Linux bash script ----
+          cat > "$TARGET_DIR/reassemble.sh" << 'EOF'
+          #!/bin/bash
+          # 🔧 Reassemble parts back to original file
+          PARTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+          OUTPUT_FILE="${PARTS_DIR}/ORIG_NAME_PLACEHOLDER"
+          echo "🔄 Reassembling parts into: $OUTPUT_FILE"
+          cat "${PARTS_DIR}"/part_* > "$OUTPUT_FILE"
+          echo "✅ Done. File size: $(stat -c%s "$OUTPUT_FILE") bytes"
+          EOF
+          sed -i "s/ORIG_NAME_PLACEHOLDER/$ORIG_NAME/g" "$TARGET_DIR/reassemble.sh"
+          chmod +x "$TARGET_DIR/reassemble.sh"
+
+          # ---- Windows PowerShell script ----
+          cat > "$TARGET_DIR/reassemble.ps1" << 'EOF'
+          # 🔧 Reassemble parts back to original file
+          $partsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+          $outputFile = Join-Path $partsDir "ORIG_NAME_PLACEHOLDER"
+          Write-Host "🔄 Reassembling parts into: $outputFile"
+          $parts = Get-ChildItem -Path $partsDir -Filter "part_*" | Sort-Object Name
+          $fileStream = [System.IO.File]::OpenWrite($outputFile)
+          foreach ($part in $parts) {
+              $bytes = [System.IO.File]::ReadAllBytes($part.FullName)
+              $fileStream.Write($bytes, 0, $bytes.Length)
+          }
+          $fileStream.Close()
+          Write-Host "✅ Done. File size: $((Get-Item $outputFile).Length) bytes"
+          EOF
+          sed -i "s/ORIG_NAME_PLACEHOLDER/$ORIG_NAME/g" "$TARGET_DIR/reassemble.ps1"
+
+      - name: 📦 Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          if [ "${{ steps.check.outputs.should_split }}" == "true" ]; then
+            TARGET_DIR="downloads/${{ steps.filenames.outputs.folder_name }}"
+            git add "$TARGET_DIR"
+            git commit -m "✂️ Add split parts for ${{ steps.filenames.outputs.original_filename }} (size ${{ inputs.part_size }} parts)" || echo "Nothing to commit"
+          else
+            git add "downloads/${{ steps.filenames.outputs.original_filename }}"
+            git commit -m "📄 Add direct file ${{ steps.filenames.outputs.original_filename }}" || echo "Nothing to commit"
+          fi
+          git push
