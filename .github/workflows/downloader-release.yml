@@ -1,0 +1,56 @@
+name: 📥 Download & Release Large File
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: '🔗 لینک فایل ۹ گیگی'
+        required: true
+        type: string
+      release_tag:
+        description: '🏷️ اسم تگ Release (مثلاً v1.0)'
+        required: true
+        type: string
+        default: 'large-file-v1'
+
+permissions:
+  contents: write
+
+jobs:
+  upload-to-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ دانلود فایل
+        run: |
+          echo "در حال دانلود فایل..."
+          curl -L --retry 3 --progress-bar "${{ inputs.download_url }}" -o large_file
+
+      - name: 📊 بررسی حجم فایل
+        run: |
+          FILE_SIZE=$(stat -c%s large_file)
+          FILE_SIZE_GB=$((FILE_SIZE / 1024 / 1024 / 1024))
+          echo "حجم فایل: $FILE_SIZE_GB گیگابایت"
+          
+          if [ $FILE_SIZE_GB -gt 10 ]; then
+            echo "⚠️ فایل بزرگتر از ۱۰ گیگه. شاید آپلود نشه."
+          fi
+
+      - name: 🗑️ حذف Release قدیمی (اگه باشه)
+        run: |
+          gh release delete "${{ inputs.release_tag }}" --yes --cleanup-tag || echo "Release قبلی وجود نداشت"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: 📦 ساخت Release جدید و آپلود فایل
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "فایل دانلودی - ${{ inputs.release_tag }}"
+          files: large_file
+          generate_release_notes: false
+          make_latest: true
+
+      - name: 🔗 نمایش لینک دانلود
+        run: |
+          echo "✅ فایل با موفقیت آپلود شد!"
+          echo "🔗 لینک دانلود: https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/large_file"
